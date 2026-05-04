@@ -1,0 +1,48 @@
+# ETHOS Configuration
+
+project:
+  name: "ETHOS"
+  version: "0.1.0"
+
+paths:
+  data_raw: "data/raw"
+  data_processed: "data/processed"
+  embeddings_cache: "data/embeddings_cache"
+  outputs: "outputs"
+
+datasets:
+  lfw:
+    enabled: true
+    url: "http://vis-www.cs.umass.edu/lfw/lfw-deepfunneled.tgz"
+  fairface:
+    enabled: true
+    classes:
+      gender: ["Male", "Female"]
+      age: ["0-2", "3-9", "10-19", "20-29", "30-39", "40-49", "50-59", "60-69", "70+"]
+      race: ["White", "Black", "Latino_Hispanic", "East Asian", "Southeast Asian", "Indian", "Middle Eastern"]
+  rfw:
+    enabled: false  # awaiting access
+    classes:
+      race: ["Caucasian", "African", "Asian", "Indian"]
+
+face_recognition:
+  detection_model: "retinaface"
+  embedding_model: "arcface"
+  image_size: 112
+  embedding_dim: 512
+
+matching:
+  similarity_metric: "cosine"
+  default_threshold: 0.55
+
+fairness:
+  alert_thresholds:
+    disparate_impact_min: 0.80
+    fmrd_max: 1.50
+    fnmrd_max: 1.50
+
+llm:
+  provider: "anthropic"
+  model: "claude-sonnet-4-5"
+  max_tokens: 2000
+  temperature: 0.3
