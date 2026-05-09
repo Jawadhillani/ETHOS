@@ -39,7 +39,9 @@ class MatchingEngine:
         Returns: (N_query, N_gallery) similarity matrix.
         Memory-safe: callers should chunk their queries if gallery is huge.
         """
-        return query_embs @ gallery_embs.T
+        q = query_embs.astype(np.float32, copy=False)
+        g = gallery_embs.astype(np.float32, copy=False)
+        return q @ g.T
 
     def is_match(self, similarity: float) -> bool:
         """Threshold-based match decision."""
