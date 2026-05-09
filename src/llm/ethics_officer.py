@@ -24,7 +24,7 @@ _ENV_PATH = Path(__file__).parent.parent.parent / ".env"
 load_dotenv(dotenv_path=_ENV_PATH)
 
 MODEL = "claude-sonnet-4-5"
-MAX_TOKENS = 2048
+MAX_TOKENS = 4096
 
 _SYSTEM_PROMPT = """You are the Ethics Officer of ETHOS, an EU AI Act compliance \
 auditing system for facial biometric recognition technology. Your role is to:
