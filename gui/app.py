@@ -13,6 +13,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# Register HEIC/HEIF support so iPhone photos work with PIL
+import pillow_heif
+pillow_heif.register_heif_opener()
+
 import gradio as gr
 import numpy as np
 
@@ -29,15 +33,20 @@ from src.matching.engine import MatchingEngine
 from src.matching.verifier import Verifier
 from src.matching.identifier import Identifier
 from src.llm.ethics_officer import EthicsOfficer
+from src.security.pad_detector import PADDetector
 
 DEFAULT_THRESHOLD = 0.1810
+
+# Rolling FPS tracker shared across streaming frames
+_fps_times: list = []
 
 
 # ── Lazy singletons ───────────────────────────────────────────────────────────
 
-_verifier: Verifier | None = None
-_identifier: Identifier | None = None
-_officer: EthicsOfficer | None = None
+_verifier:  Verifier     | None = None
+_identifier: Identifier  | None = None
+_officer:   EthicsOfficer | None = None
+_pad:       PADDetector   | None = None
 
 
 def get_verifier(threshold: float = DEFAULT_THRESHOLD) -> Verifier:
@@ -59,6 +68,13 @@ def get_officer() -> EthicsOfficer:
     if _officer is None:
         _officer = EthicsOfficer()
     return _officer
+
+
+def get_pad() -> PADDetector:
+    global _pad
+    if _pad is None:
+        _pad = PADDetector()
+    return _pad
 
 
 # ── Tab 1: Landing ────────────────────────────────────────────────────────────
@@ -341,35 +357,147 @@ def chat_respond(message, history):
     return history, ""
 
 
-# ── Tab 6: Generate Report ────────────────────────────────────────────────────
+# ── Tab 6: Live Assessment ───────────────────────────────────────────────────
+
+def process_live_frame(frame_rgb: np.ndarray | None):
+    """
+    Per-frame callback for the webcam stream.
+
+    Gradio passes frames as RGB numpy arrays (H, W, 3).
+    Returns: (annotated_rgb, fps_html, score_html, verdict_html)
+    """
+    global _fps_times
+
+    if frame_rgb is None:
+        blank = np.zeros((480, 640, 3), dtype=np.uint8)
+        return blank, _fps_html(0), _score_html(0.0), _verdict_html(None)
+
+    t_frame = time.perf_counter()
+    bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+
+    from gui.inference import _model as _insightface_model
+    app_if = _insightface_model()
+    faces  = app_if.get(bgr)
+
+    pad_result = None
+    for face in faces:
+        bbox = face.bbox.astype(int)   # [x1, y1, x2, y2]
+        pad_result = get_pad().score(bgr, bbox)
+
+        # Pick colour based on confidence level
+        c = pad_result.color_bgr
+        color = (int(c[0]), int(c[1]), int(c[2]))
+
+        # Bounding box
+        cv2.rectangle(bgr, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
+
+        # Label above box
+        label = f"{pad_result.attack_label}  {pad_result.real_score:.2f}"
+        lx, ly = bbox[0], max(bbox[1] - 10, 0)
+        cv2.putText(bgr, label, (lx, ly),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
+
+    # Rolling FPS over last 30 frames
+    _fps_times.append(t_frame)
+    _fps_times = [t for t in _fps_times if t_frame - t <= 2.0]  # last 2s
+    fps = max(1, len(_fps_times) - 1) / max(t_frame - _fps_times[0], 1e-6) if len(_fps_times) > 1 else 0
+
+    annotated_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    return (
+        annotated_rgb,
+        _fps_html(fps, pad_result.inference_ms if pad_result else 0),
+        _score_html(pad_result.real_score if pad_result else 0.0),
+        _verdict_html(pad_result),
+    )
+
+
+def _fps_html(fps: float, inf_ms: float = 0) -> str:
+    color = "#68d391" if fps >= 10 else "#fc8181"
+    return (
+        f'<div style="font-family:monospace; font-size:14px; color:{color}; '
+        f'padding:4px 8px; background:#1a2233; border-radius:4px; display:inline-block;">'
+        f'FPS: <b>{fps:.1f}</b>&nbsp;&nbsp;Inference: <b>{inf_ms:.1f} ms</b>'
+        f'</div>'
+    )
+
+
+def _score_html(real_score: float) -> str:
+    pct  = int(real_score * 100)
+    if real_score >= 0.75:
+        bar_color = "#68d391"
+        label = "Real Face"
+    elif real_score >= 0.45:
+        bar_color = "#f6ad55"
+        label = "Uncertain"
+    else:
+        bar_color = "#fc8181"
+        label = "Spoof"
+    return f"""
+    <div style="padding:8px; background:#1a2233; border-radius:6px;">
+      <div style="font-size:12px; color:#a0aec0; margin-bottom:4px;">
+        PAD Score — <b style="color:#e2e8f0;">{label}</b>
+        &nbsp;<span style="color:{bar_color}; font-weight:700;">{real_score:.3f}</span>
+      </div>
+      <div style="height:14px; background:#2d3748; border-radius:7px; overflow:hidden;">
+        <div style="width:{pct}%; height:100%;
+                    background:{bar_color}; border-radius:7px;
+                    transition:width 0.15s ease;"></div>
+      </div>
+    </div>"""
+
+
+def _verdict_html(result) -> str:
+    if result is None:
+        return '<div style="font-size:20px; color:#a0aec0; padding:8px;">No face detected</div>'
+    if result.is_real:
+        return (
+            '<div style="font-size:22px; font-weight:700; color:#68d391; padding:8px;">'
+            '✅ Real Face</div>'
+        )
+    return (
+        f'<div style="font-size:22px; font-weight:700; color:#fc8181; padding:8px;">'
+        f'❌ Spoof — {result.attack_label}</div>'
+    )
+
+
+# ── Tab 7: Generate Report ────────────────────────────────────────────────────
 
 def generate_pdf_report(progress=gr.Progress()):
-    progress(0, desc="Calling Ethics Officer — analysis…")
+    progress(0.10, desc="Calling Ethics Officer — analysis…")
     officer = get_officer()
     report  = state.fairness_report()
 
-    progress(0.25, desc="Calling Ethics Officer — analysis…")
     analysis = officer.analyze_fairness_report(report)
 
     progress(0.55, desc="Generating compliance summary…")
     summary = officer.generate_compliance_summary(report)
 
-    progress(0.75, desc="Building PDF…")
+    progress(0.80, desc="Building PDF…")
     from src.reports.compliance_pdf import ComplianceReportGenerator
     gen = ComplianceReportGenerator(plots_dir=str(state.PLOTS_DIR))
-    ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
     fname = f"ethos_compliance_audit_{ts}.pdf"
     pdf_path = str(state.REPORTS_DIR / fname)
     gen.generate(report, analysis, summary, pdf_path)
 
-    # Also save to photos/
-    photos_copy = str(ROOT / "photos" / fname)
-    shutil.copy2(pdf_path, photos_copy)
-
     progress(1.0, desc="Done.")
     size_kb = Path(pdf_path).stat().st_size // 1024
-    status = f"✓ Generated: {fname}  ({size_kb} KB)  →  also saved to photos/"
-    return pdf_path, status
+
+    # Inline viewer — Gradio serves the file via /file= endpoint
+    viewer_html = f"""
+    <div style="margin-top:12px;">
+      <p style="color:#a0aec0; font-size:12px; margin-bottom:8px;">
+        ✓ <b style="color:#e2e8f0;">{fname}</b> ({size_kb} KB)
+        — scroll below to read · use the download button above to save
+      </p>
+      <iframe
+        src="/file={pdf_path}"
+        width="100%" height="860px"
+        style="border:1px solid #2d3748; border-radius:8px; background:#fff;"
+      ></iframe>
+    </div>
+    """
+    return pdf_path, f"✓ {size_kb} KB — ready", viewer_html
 
 
 # ── Build UI ──────────────────────────────────────────────────────────────────
@@ -514,7 +642,37 @@ def build_app() -> gr.Blocks:
                 outputs=[chatbot, chat_input],
             )
 
-        # ── Tab 6: Generate Report ────────────────────────────────────────────
+        # ── Tab 6: Live Assessment ────────────────────────────────────────────
+        with gr.Tab("🛡️  Live Assessment"):
+            gr.Markdown("### Live Liveness Assessment")
+            gr.Markdown(
+                "Real-time Presentation Attack Detection via webcam. "
+                "RetinaFace detects the face, MiniFASNetV2 runs PAD, "
+                "ArcFace embeds only if PAD passes. Target: ≥10 FPS on M4.",
+                elem_classes=["hero-sub"],
+            )
+            with gr.Row():
+                with gr.Column(scale=1):
+                    webcam_in  = gr.Image(
+                        sources=["webcam"], streaming=True,
+                        label="Webcam Feed", type="numpy", height=360,
+                    )
+                with gr.Column(scale=1):
+                    live_out   = gr.Image(label="Annotated Output", type="numpy", height=360)
+
+            fps_display     = gr.HTML(_fps_html(0))
+            pad_score_disp  = gr.HTML(_score_html(0.0))
+            verdict_disp    = gr.HTML(_verdict_html(None))
+
+            webcam_in.stream(
+                fn=process_live_frame,
+                inputs=[webcam_in],
+                outputs=[live_out, fps_display, pad_score_disp, verdict_disp],
+                stream_every=0.04,   # ~25 FPS target
+                time_limit=300,
+            )
+
+        # ── Tab 7: Generate Report ────────────────────────────────────────────
         with gr.Tab("📄  Generate Report"):
             gr.Markdown("### EU AI Act Compliance Report")
             gr.Markdown(
@@ -527,11 +685,12 @@ def build_app() -> gr.Blocks:
                 gen_btn    = gr.Button("Generate PDF Report", variant="primary", scale=2)
             gen_status = gr.Markdown("")
             pdf_output = gr.File(label="Download Report", visible=True)
+            pdf_viewer = gr.HTML()
 
             gen_btn.click(
                 fn=generate_pdf_report,
                 inputs=[],
-                outputs=[pdf_output, gen_status],
+                outputs=[pdf_output, gen_status, pdf_viewer],
             )
 
     return app
@@ -539,12 +698,41 @@ def build_app() -> gr.Blocks:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def _preload_background():
+    """
+    Warm up slow resources in a background thread so the first user click
+    is instant instead of hanging for 20-30 seconds.
+    """
+    import threading
+
+    def _load():
+        print("  [preload] Loading InsightFace model…")
+        t = time.time()
+        from gui.inference import _model
+        _model()
+        print(f"  [preload] InsightFace ready  ({(time.time()-t):.1f}s)")
+
+        print("  [preload] Loading FairFace embeddings cache…")
+        t = time.time()
+        _ = state.fairface()
+        print(f"  [preload] FairFace ready  ({len(state.fairface()['embeddings']):,} embs, {(time.time()-t):.1f}s)")
+
+        print("  [preload] Loading PAD model…")
+        t = time.time()
+        get_pad()
+        print(f"  [preload] PAD ready  ({(time.time()-t):.2f}s)")
+
+        print("  [preload] All resources warm ✓")
+
+    threading.Thread(target=_load, daemon=True).start()
+
+
 if __name__ == "__main__":
     t0 = time.time()
     print("Starting ETHOS GUI…")
     app = build_app()
-    startup = time.time() - t0
-    print(f"App built in {startup*1000:.0f} ms  (embeddings lazy — not yet loaded)")
+    print(f"App built in {(time.time()-t0)*1000:.0f} ms")
+    _preload_background()   # start warming model + cache in background
     app.launch(
         server_name="127.0.0.1",
         server_port=7860,
@@ -552,4 +740,5 @@ if __name__ == "__main__":
         show_error=True,
         theme=ethos_theme(),
         css=CUSTOM_CSS,
+        allowed_paths=[str(state.REPORTS_DIR)],
     )
