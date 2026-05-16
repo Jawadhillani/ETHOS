@@ -30,10 +30,11 @@ from src.robustness.perturbations import (
     gaussian_blur, brightness, rotation, downsample, gaussian_noise,
 )
 
-LFW_EMB      = ROOT / "data/embeddings_cache/lfw_embeddings.npz"
+LFW_EMB       = ROOT / "data/embeddings_cache/lfw_embeddings.npz"
 LFW_EXTRACTED = ROOT / "data/raw/lfw/lfw_extracted"
-PLOT_OUT     = ROOT / "outputs/plots/robustness_degradation.png"
-JSON_OUT     = ROOT / "outputs/reports/robustness_results.json"
+ARCFACE_ONNX  = Path.home() / ".insightface/models/buffalo_l/w600k_r50.onnx"
+PLOT_OUT      = ROOT / "outputs/plots/robustness_degradation.png"
+JSON_OUT      = ROOT / "outputs/reports/robustness_results.json"
 
 THRESHOLD = 0.1810
 N_PAIRS   = 1000
@@ -41,58 +42,70 @@ SEED      = 42
 
 # Perturbation sweep configs: (name, fn, severities, x_label)
 PERTURBATIONS = [
-    ("Gaussian Blur",   gaussian_blur,   [0, 1, 2, 4, 8],         "σ (px)"),
+    ("Gaussian Blur",   gaussian_blur,   [0, 1, 2, 4, 8],               "σ (px)"),
     ("Brightness",      brightness,      [1.0, 0.6, 0.3, 0.1, 2.0, 3.0], "factor"),
-    ("Rotation",        rotation,        [0, 5, 10, 20, 45, 90],  "angle (°)"),
+    ("Rotation",        rotation,        [0, 5, 10, 20, 45, 90],          "angle (°)"),
     ("Downsample",      downsample,      [1.0, 0.5, 0.25, 0.125, 0.0625], "scale"),
-    ("Gaussian Noise",  gaussian_noise,  [0, 10, 25, 50, 100],    "σ (px value)"),
+    ("Gaussian Noise",  gaussian_noise,  [0, 10, 25, 50, 100],            "σ (px value)"),
 ]
 
 
-def load_insightface():
-    """Load InsightFace model (lazy, cached)."""
-    from insightface.app import FaceAnalysis
-    app = FaceAnalysis(
-        name="buffalo_l",
+def load_arcface():
+    """
+    Load ArcFace recognition model directly (no RetinaFace detection stage).
+
+    LFW extracted images are 112×112 pre-aligned face crops — RetinaFace
+    cannot detect faces in these tiny crops.  We run ArcFace directly with
+    the same normalisation the model was trained with: (pixel − 127.5) / 127.5.
+    """
+    import onnxruntime as ort
+    sess = ort.InferenceSession(
+        str(ARCFACE_ONNX),
         providers=["CoreMLExecutionProvider", "CPUExecutionProvider"],
     )
-    app.prepare(ctx_id=0, det_size=(640, 640))
-    return app
+    inp_name = sess.get_inputs()[0].name
+    return sess, inp_name
 
 
-def extract_embedding(app, img_bgr: np.ndarray) -> np.ndarray | None:
-    """Extract single embedding; returns None if no face detected."""
-    faces = app.get(img_bgr)
-    if not faces:
+def extract_embedding(sess, inp_name: str, img_bgr: np.ndarray) -> np.ndarray | None:
+    """
+    Extract ArcFace embedding from a 112×112 BGR image.
+    Returns L2-normalised 512-dim float32 vector, or None if image is bad.
+    """
+    if img_bgr is None or img_bgr.shape[:2] != (112, 112):
+        # Resize to 112×112 if not already (e.g. after downsample+upsample)
+        if img_bgr is None:
+            return None
+        img_bgr = cv2.resize(img_bgr, (112, 112), interpolation=cv2.INTER_LINEAR)
+    norm = (img_bgr.astype(np.float32) - 127.5) / 127.5
+    inp  = norm.transpose(2, 0, 1)[np.newaxis]          # (1, 3, 112, 112)
+    out  = sess.run(None, {inp_name: inp})[0][0]        # (512,)
+    nrm  = np.linalg.norm(out)
+    if nrm < 1e-6:
         return None
-    face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-    return face.normed_embedding.astype(np.float32)
+    return (out / nrm).astype(np.float32)
 
 
-def evaluate_perturbation(app, pair_indices, issame, fn, severity) -> dict:
+def evaluate_perturbation(sess, inp_name, pair_indices, fn, severity,
+                           cached_embs) -> dict:
     """
-    Apply `fn(img, severity)` to the B-side of each pair, re-extract embedding,
-    compute similarity vs. pre-stored A-side embedding, count matches.
+    Apply fn(img, severity) to the B-side of each pair, re-extract via
+    ArcFace directly, compute similarity vs. A-side cached embedding.
     """
-    data       = np.load(str(LFW_EMB), allow_pickle=True)
-    embeddings = data["embeddings"]
-
     sims      = []
     n_matched = 0
     n_valid   = 0
 
     for pair_idx in pair_indices:
-        # A-side: use cached embedding (not perturbed)
-        emb_a = embeddings[pair_idx * 2]
+        emb_a = cached_embs[pair_idx * 2]           # A-side cached
 
-        # B-side: load image, apply perturbation, re-extract
         b_path = LFW_EXTRACTED / f"pair_{pair_idx:04d}_b.jpg"
         img    = cv2.imread(str(b_path))
         if img is None:
             continue
 
         perturbed = fn(img, severity)
-        emb_b     = extract_embedding(app, perturbed)
+        emb_b     = extract_embedding(sess, inp_name, perturbed)
         if emb_b is None:
             continue
 
@@ -148,14 +161,22 @@ def main():
     # ── Select 1000 genuine pairs ─────────────────────────────────────────────
     data    = np.load(str(LFW_EMB), allow_pickle=True)
     issame  = data["issame"].astype(bool)
+    cached_embs = data["embeddings"]          # (12000, 512)
     genuine = np.where(issame)[0]
     pair_indices = rng.choice(genuine, size=min(N_PAIRS, len(genuine)), replace=False)
     print(f"Selected {len(pair_indices)} genuine pairs for robustness eval.")
 
-    # ── Load InsightFace (once) ───────────────────────────────────────────────
-    print("Loading InsightFace model …")
-    app = load_insightface()
-    print("Model ready.\n")
+    # ── Load ArcFace recognition model (direct — no RetinaFace) ──────────────
+    print("Loading ArcFace model (direct, no RetinaFace) …")
+    sess, inp_name = load_arcface()
+    # Sanity-check on first genuine pair
+    b0 = LFW_EXTRACTED / f"pair_{pair_indices[0]:04d}_b.jpg"
+    img0 = cv2.imread(str(b0))
+    emb_test = extract_embedding(sess, inp_name, img0)
+    emb_cache = cached_embs[pair_indices[0] * 2 + 1]
+    sim_check = float(np.dot(emb_test, emb_cache))
+    print(f"Model ready. Sanity-check similarity (re-extracted vs cached): {sim_check:.4f}")
+    print(f"  (expected ~0.9+ for same 112×112 image)\n")
 
     # ── Evaluate each perturbation ────────────────────────────────────────────
     all_results = {}
@@ -166,7 +187,8 @@ def main():
 
         for sev in severities:
             t0 = time.perf_counter()
-            res = evaluate_perturbation(app, pair_indices, issame, fn, sev)
+            res = evaluate_perturbation(sess, inp_name, pair_indices, fn, sev,
+                                        cached_embs)
             elapsed = time.perf_counter() - t0
             pert_results.append({
                 "severity":   sev,
