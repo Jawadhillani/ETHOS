@@ -17,15 +17,18 @@ from pathlib import Path
 import pillow_heif
 pillow_heif.register_heif_opener()
 
+import cv2
 import gradio as gr
 import numpy as np
+import plotly.graph_objects as go
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 from gui.styles import ethos_theme, CUSTOM_CSS
 from gui.plots import (
-    far_bar_chart, fmrd_gauge, score_distribution, roc_curve, similarity_bar
+    far_bar_chart, fmrd_gauge, score_distribution, roc_curve, similarity_bar,
+    cmc_curve, robustness_chart,
 )
 import gui.state as state
 
@@ -111,6 +114,25 @@ LANDING_HTML = """
     <div class="stat-item">
       <div class="stat-num">1.37×</div>
       <div class="stat-desc">Gender FMRD (PASS)</div>
+    </div>
+  </div>
+  <hr class="hero-divider"/>
+  <div class="stat-row">
+    <div class="stat-item">
+      <div class="stat-num">47.87%</div>
+      <div class="stat-desc">1:N Rank-1 (3k gallery)</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-num">97.30%</div>
+      <div class="stat-desc">1:N Rank-5</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-num">99.77%</div>
+      <div class="stat-desc">1:N Rank-10</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-num">MiniFASNet</div>
+      <div class="stat-desc">PAD · 299 FPS on M4</div>
     </div>
   </div>
   <hr class="hero-divider"/>
@@ -317,15 +339,120 @@ def load_dashboard():
     )
 
 
-# ── Tab 5: Ethics Officer Chat ────────────────────────────────────────────────
+# ── Tab 5: Identification Metrics + Robustness ───────────────────────────────
 
-_chat_context = (
-    "You are the Ethics Officer of ETHOS. You have access to the following "
-    "fairness audit results:\n\n"
-    + json.dumps(state.fairness_report() if state.FAIRNESS_JSON.exists() else {}, indent=2)
-    + "\n\nAnswer questions about the system's bias findings, EU AI Act compliance, "
-    "and mitigation strategies. Be precise and cite numbers."
-)
+def load_id_metrics():
+    """Load CMC + robustness data and return chart figures + summary HTML."""
+    m = state.id_metrics()
+    r = state.robustness_results()
+
+    cmc_fig  = cmc_curve(m["rank_k"], m["n_gallery"], m["n_probes"])
+    rob_fig  = robustness_chart(r) if r else go.Figure()
+
+    summary = f"""
+    <div style="display:flex; gap:24px; flex-wrap:wrap; margin-bottom:12px;">
+      <div class="stat-item">
+        <div class="stat-num">{m['rank_1']*100:.2f}%</div>
+        <div class="stat-desc">Rank-1 ({m['n_gallery']:,}-gallery)</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-num">{m['rank_5']*100:.2f}%</div>
+        <div class="stat-desc">Rank-5</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-num">{m['rank_10']*100:.2f}%</div>
+        <div class="stat-desc">Rank-10</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-num">{m['n_probes']:,}</div>
+        <div class="stat-desc">Probe images</div>
+      </div>
+    </div>
+    <p style="color:#a0aec0; font-size:12px; max-width:680px; line-height:1.6;">
+      Rank-1 of <b style="color:#e2e8f0;">{m['rank_1']*100:.2f}%</b> is expected for 1:N
+      identification in a {m['n_gallery']:,}-subject gallery — the same model achieves
+      99.70% in 1:1 verification. Rank-10 at
+      <b style="color:#68d391;">{m['rank_10']*100:.2f}%</b> confirms embeddings are
+      well-separated; gallery size is the primary driver of Rank-1 degradation.
+    </p>
+    """
+
+    # Robustness summary text
+    rob_rows = ""
+    if r and "perturbations" in r:
+        for name, rows in r["perturbations"].items():
+            base  = rows[0]["match_rate"] * 100
+            worst = min(row["match_rate"] for row in rows) * 100
+            drop  = base - worst
+            color = "#e53e3e" if drop > 20 else "#f6ad55" if drop > 5 else "#68d391"
+            rob_rows += f"""
+            <tr>
+              <td style="padding:6px 10px; color:#e2e8f0;">{name}</td>
+              <td style="padding:6px 10px; text-align:center; color:#4299e1;">{base:.1f}%</td>
+              <td style="padding:6px 10px; text-align:center; color:{color};">{worst:.1f}%</td>
+              <td style="padding:6px 10px; text-align:center; color:{color}; font-weight:700;">
+                −{drop:.1f} pp</td>
+            </tr>"""
+
+    rob_summary = f"""
+    <table style="width:100%; border-collapse:collapse; background:#1e2d3d;
+                  border-radius:8px; overflow:hidden; margin-top:8px;">
+      <thead>
+        <tr style="background:#1a365d;">
+          <th style="padding:8px 10px; text-align:left; color:#e2e8f0; font-size:11px;">
+            PERTURBATION</th>
+          <th style="padding:8px 10px; text-align:center; color:#e2e8f0; font-size:11px;">
+            BASELINE</th>
+          <th style="padding:8px 10px; text-align:center; color:#e2e8f0; font-size:11px;">
+            WORST</th>
+          <th style="padding:8px 10px; text-align:center; color:#e2e8f0; font-size:11px;">
+            DROP</th>
+        </tr>
+      </thead>
+      <tbody>{rob_rows if rob_rows else
+        "<tr><td colspan='4' style='padding:12px; color:#a0aec0; text-align:center;'>"
+        "Robustness results not yet available — run evaluate_robustness.py</td></tr>"
+      }</tbody>
+    </table>
+    """ if r and "perturbations" in r else (
+        "<p style='color:#a0aec0;'>Run scripts/evaluate_robustness.py to see results.</p>"
+    )
+
+    return summary, cmc_fig, rob_fig, rob_summary
+
+
+# ── Tab 6: Ethics Officer Chat ────────────────────────────────────────────────
+
+def _build_chat_context() -> str:
+    parts = ["You are the Ethics Officer of ETHOS.\n\n"]
+    if state.FAIRNESS_JSON.exists():
+        parts.append("FAIRNESS AUDIT:\n" +
+                     json.dumps(state.fairness_report(), indent=2))
+    if state.ID_METRICS_JSON.exists():
+        parts.append("\n\nIDENTIFICATION METRICS:\n" +
+                     json.dumps(state.id_metrics(), indent=2))
+    if state.ROBUSTNESS_JSON.exists():
+        rob = state.robustness_results()
+        # Summarise to save context tokens
+        rob_summary = {
+            name: {
+                "baseline_match_rate": rows[0]["match_rate"],
+                "worst_match_rate":    min(r["match_rate"] for r in rows),
+                "drop_pp":             round((rows[0]["match_rate"] -
+                                              min(r["match_rate"] for r in rows)) * 100, 1),
+                "severities":          [r["severity"] for r in rows],
+            }
+            for name, rows in rob.get("perturbations", {}).items()
+        }
+        parts.append("\n\nROBUSTNESS RESULTS:\n" + json.dumps(rob_summary, indent=2))
+    parts.append(
+        "\n\nAnswer questions about bias, EU AI Act compliance, "
+        "identification accuracy, or robustness. Be precise and cite numbers."
+    )
+    return "".join(parts)
+
+
+_chat_context = _build_chat_context()
 
 
 def chat_respond(message, history):
@@ -607,7 +734,29 @@ def build_app() -> gr.Blocks:
                 ],
             )
 
-        # ── Tab 5: Ethics Officer Chat ────────────────────────────────────────
+        # ── Tab 5: Identification Metrics + Robustness ───────────────────────
+        with gr.Tab("📈  Identification + Robustness"):
+            gr.Markdown("### 1:N Identification Metrics & Robustness")
+            gr.Markdown(
+                "CMC curve on a 3,000-subject LFW gallery. "
+                "Robustness shows match-rate drop under blur, brightness shift, "
+                "rotation, downsampling, and Gaussian noise.",
+                elem_classes=["hero-sub"],
+            )
+            metrics_btn     = gr.Button("Load Results", variant="primary")
+            id_summary_html = gr.HTML()
+            with gr.Row():
+                cmc_plot_fig = gr.Plot(label="CMC Curve")
+                rob_plot_fig = gr.Plot(label="Robustness Degradation")
+            rob_table_html  = gr.HTML()
+
+            metrics_btn.click(
+                fn=load_id_metrics,
+                inputs=[],
+                outputs=[id_summary_html, cmc_plot_fig, rob_plot_fig, rob_table_html],
+            )
+
+        # ── Tab 6: Ethics Officer Chat ────────────────────────────────────────
         with gr.Tab("💬  Ethics Officer"):
             gr.Markdown("### Ethics Officer")
             gr.Markdown(
@@ -642,7 +791,7 @@ def build_app() -> gr.Blocks:
                 outputs=[chatbot, chat_input],
             )
 
-        # ── Tab 6: Live Assessment ────────────────────────────────────────────
+        # ── Tab 7: Live Assessment ────────────────────────────────────────────
         with gr.Tab("🛡️  Live Assessment"):
             gr.Markdown("### Live Liveness Assessment")
             gr.Markdown(
@@ -672,7 +821,7 @@ def build_app() -> gr.Blocks:
                 time_limit=300,
             )
 
-        # ── Tab 7: Generate Report ────────────────────────────────────────────
+        # ── Tab 8: Generate Report ────────────────────────────────────────────
         with gr.Tab("📄  Generate Report"):
             gr.Markdown("### EU AI Act Compliance Report")
             gr.Markdown(
