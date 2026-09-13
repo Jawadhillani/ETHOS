@@ -3,6 +3,17 @@
 
 A facial biometric recognition system with built-in AI-powered fairness auditing, designed for EU AI Act compliance.
 
+## Key Results
+
+| Metric | Value |
+|--------|-------|
+| EER (Equal Error Rate) | **0.30%** |
+| AUC | **0.9994** |
+| Race FMRD (fairness gap) | **9.19×** |
+| Age FMRD (fairness gap) | **42.30×** |
+
+> FMRD (Fairness-weighted Match Rate Disparity) measures recognition gap across demographic subgroups — lower is fairer.
+
 ## Overview
 
 ETHOS is a full-stack biometric pipeline that combines state-of-the-art face recognition with demographic fairness analysis. It detects, embeds, matches, and audits facial biometrics — flagging bias across gender, age, and ethnicity groups in compliance with EU AI Act requirements.
