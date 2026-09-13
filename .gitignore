@@ -19,6 +19,8 @@ data/embeddings_cache/
 outputs/plots/
 outputs/reports/
 outputs/logs/
+ethos_server.log
+photos/
 
 # OS
 .DS_Store
@@ -27,6 +29,11 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
 
 # Secrets
 *.key

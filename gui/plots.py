@@ -8,17 +8,17 @@ import plotly.graph_objects as go
 import plotly.express as px
 import numpy as np
 
-# Matches the CSS palette
-BG    = "#1a2233"
-PAPER = "#1e2d3d"
-GRID  = "#2d3748"
-TEXT  = "#e2e8f0"
-TEXT2 = "#a0aec0"
+# Matches the premium dark dashboard palette
+BG    = "#0d1420"
+PAPER = "#111828"
+GRID  = "rgba(255,255,255,0.07)"
+TEXT  = "#f1f5f9"
+TEXT2 = "#94a3b8"
 
 _COLORS = [
-    "#4299e1", "#f6ad55", "#68d391", "#b794f4",
-    "#fc8181", "#76e4f7", "#f687b3", "#fbd38d",
-    "#9ae6b4",
+    "#00d4ff", "#f59e0b", "#10b981", "#a78bfa",
+    "#ef4444", "#34d399", "#f472b6", "#fbbf24",
+    "#6ee7b7",
 ]
 
 _LAYOUT = dict(
@@ -28,10 +28,15 @@ _LAYOUT = dict(
     # margin and xaxis/yaxis intentionally omitted — set per-chart to avoid
     # duplicate keyword argument errors when spreading **_LAYOUT
     legend=dict(
-        bgcolor="rgba(0,0,0,0)",
+        bgcolor="rgba(13, 20, 32, 0.6)",
         bordercolor=GRID,
         borderwidth=1,
         font=dict(size=11),
+        orientation="h",
+        yanchor="bottom",
+        y=1.02,
+        xanchor="right",
+        x=1,
     ),
 )
 
@@ -57,7 +62,7 @@ def far_bar_chart(per_group: dict, axis_label: str) -> go.Figure:
         **_LAYOUT,
         xaxis=dict(gridcolor=GRID, zerolinecolor=GRID),
         yaxis=dict(gridcolor=GRID, zerolinecolor=GRID),
-        margin=dict(l=16, r=80, t=40, b=16),
+        margin=dict(l=110, r=80, t=60, b=40),
         title=dict(text=f"False Acceptance Rate by {axis_label}", font=dict(size=14, color=TEXT)),
         xaxis_title="FAR (%)",
         height=max(300, len(groups) * 48 + 80),
@@ -69,7 +74,7 @@ def far_bar_chart(per_group: dict, axis_label: str) -> go.Figure:
 def fmrd_gauge(fmrd: float, threshold: float = 1.5) -> go.Figure:
     """Gauge chart for FMRD compliance."""
     pct   = min(fmrd / (threshold * 3), 1.0)
-    color = "#2f855a" if fmrd <= threshold else "#e53e3e"
+    color = "#10b981" if fmrd <= threshold else "#ef4444"
 
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
@@ -87,8 +92,8 @@ def fmrd_gauge(fmrd: float, threshold: float = 1.5) -> go.Figure:
                 value=threshold,
             ),
             steps=[
-                dict(range=[0, threshold], color="rgba(47,133,90,0.15)"),
-                dict(range=[threshold, threshold * 3], color="rgba(229,62,62,0.10)"),
+                dict(range=[0, threshold], color="rgba(16,185,129,0.12)"),
+                dict(range=[threshold, threshold * 3], color="rgba(239,68,68,0.08)"),
             ],
         ),
         title=dict(text="FMRD", font=dict(size=14, color=TEXT2)),
@@ -96,7 +101,7 @@ def fmrd_gauge(fmrd: float, threshold: float = 1.5) -> go.Figure:
     fig.update_layout(
         **_LAYOUT,
         height=220,
-        margin=dict(l=24, r=24, t=40, b=8),
+        margin=dict(l=30, r=30, t=50, b=20),
         xaxis=dict(gridcolor=GRID, zerolinecolor=GRID),
         yaxis=dict(gridcolor=GRID, zerolinecolor=GRID),
     )
@@ -108,32 +113,33 @@ def score_distribution(genuine: np.ndarray, impostor: np.ndarray, threshold: flo
     fig = go.Figure()
     fig.add_trace(go.Histogram(
         x=impostor, name="Impostor",
-        marker_color="#fc8181", opacity=0.65,
+        marker_color="#ef4444", opacity=0.6,
         nbinsx=80, histnorm="probability density",
         hovertemplate="Sim: %{x:.3f}<extra>Impostor</extra>",
     ))
     fig.add_trace(go.Histogram(
         x=genuine, name="Genuine",
-        marker_color="#4299e1", opacity=0.65,
+        marker_color="#00d4ff", opacity=0.6,
         nbinsx=80, histnorm="probability density",
         hovertemplate="Sim: %{x:.3f}<extra>Genuine</extra>",
     ))
     fig.add_vline(
         x=threshold, line_dash="dash", line_color=TEXT,
         line_width=1.5,
-        annotation_text=f"Threshold {threshold:.3f}",
+        annotation_text=f"Threshold {threshold:.4f}",
+        annotation_position="top left",
         annotation_font=dict(color=TEXT2, size=11),
     )
     fig.update_layout(
         **_LAYOUT,
         xaxis=dict(gridcolor=GRID, zerolinecolor=GRID),
         yaxis=dict(gridcolor=GRID, zerolinecolor=GRID),
-        margin=dict(l=16, r=16, t=40, b=16),
+        margin=dict(l=50, r=20, t=60, b=40),
         barmode="overlay",
         title=dict(text="Score Distributions — Genuine vs Impostor", font=dict(size=14, color=TEXT)),
         xaxis_title="Cosine Similarity",
         yaxis_title="Density",
-        height=300,
+        height=320,
     )
     return fig
 
@@ -145,7 +151,7 @@ def roc_curve(far: np.ndarray, frr: np.ndarray, auc: float) -> go.Figure:
     fig.add_trace(go.Scatter(
         x=far[order], y=tpr[order],
         mode="lines", name=f"ETHOS (AUC={auc:.4f})",
-        line=dict(color="#4299e1", width=2.5),
+        line=dict(color="#00d4ff", width=2.5),
         hovertemplate="FAR: %{x:.4f}<br>TPR: %{y:.4f}<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
@@ -156,7 +162,7 @@ def roc_curve(far: np.ndarray, frr: np.ndarray, auc: float) -> go.Figure:
         **_LAYOUT,
         xaxis=dict(gridcolor=GRID, zerolinecolor=GRID),
         yaxis=dict(gridcolor=GRID, zerolinecolor=GRID),
-        margin=dict(l=16, r=16, t=40, b=16),
+        margin=dict(l=50, r=20, t=60, b=40),
         title=dict(text="ROC Curve", font=dict(size=14, color=TEXT)),
         xaxis_title="False Positive Rate (FAR)",
         yaxis_title="True Positive Rate (1 − FRR)",
@@ -167,7 +173,7 @@ def roc_curve(far: np.ndarray, frr: np.ndarray, auc: float) -> go.Figure:
 
 def similarity_bar(similarity: float, threshold: float) -> go.Figure:
     """Single horizontal bar showing similarity vs threshold."""
-    color = "#2f855a" if similarity >= threshold else "#e53e3e"
+    color = "#10b981" if similarity >= threshold else "#ef4444"
     fig = go.Figure(go.Bar(
         x=[similarity], y=["Similarity"],
         orientation="h",
@@ -179,7 +185,7 @@ def similarity_bar(similarity: float, threshold: float) -> go.Figure:
     ))
     fig.add_vline(
         x=threshold, line_dash="dash", line_color=TEXT2, line_width=1.5,
-        annotation_text=f"Threshold {threshold:.3f}",
+        annotation_text=f"Threshold {threshold:.4f}",
         annotation_position="top right",
         annotation_font=dict(color=TEXT2, size=10),
     )
@@ -188,7 +194,7 @@ def similarity_bar(similarity: float, threshold: float) -> go.Figure:
         xaxis=dict(range=[0, 1.05], gridcolor=GRID, zerolinecolor=GRID),
         yaxis=dict(gridcolor=GRID, zerolinecolor=GRID),
         height=130,
-        margin=dict(l=8, r=8, t=12, b=8),
+        margin=dict(l=10, r=10, t=20, b=10),
         showlegend=False,
     )
     return fig
@@ -204,13 +210,13 @@ def cmc_curve(rank_k: list, n_gallery: int, n_probes: int) -> go.Figure:
         x=ranks, y=pcts,
         mode="lines+markers",
         name="ETHOS (ArcFace buffalo_l)",
-        line=dict(color="#4299e1", width=2.5),
-        marker=dict(size=5),
+        line=dict(color="#00d4ff", width=2.5),
+        marker=dict(size=5, color="#00d4ff"),
         hovertemplate="Rank-%{x}: %{y:.2f}%<extra></extra>",
     ))
 
     # Mark key ranks
-    for k, color in [(1, "#fc8181"), (5, "#f6ad55"), (10, "#68d391")]:
+    for k, color in [(1, "#ef4444"), (5, "#f59e0b"), (10, "#10b981")]:
         if k <= len(rank_k):
             val = rank_k[k - 1] * 100
             fig.add_vline(x=k, line_dash="dash", line_color=color,
@@ -222,7 +228,7 @@ def cmc_curve(rank_k: list, n_gallery: int, n_probes: int) -> go.Figure:
         **_LAYOUT,
         xaxis=dict(gridcolor=GRID, zerolinecolor=GRID, title="Rank"),
         yaxis=dict(gridcolor=GRID, zerolinecolor=GRID, range=[0, 102]),
-        margin=dict(l=16, r=16, t=50, b=16),
+        margin=dict(l=50, r=20, t=60, b=40),
         title=dict(
             text=f"CMC Curve — {n_probes:,} probes vs {n_gallery:,}-subject gallery",
             font=dict(size=14, color=TEXT),
@@ -259,7 +265,7 @@ def robustness_chart(robustness_data: dict) -> go.Figure:
         **_LAYOUT,
         xaxis=dict(gridcolor=GRID, zerolinecolor=GRID, title="Severity Step"),
         yaxis=dict(gridcolor=GRID, zerolinecolor=GRID, range=[0, 105]),
-        margin=dict(l=16, r=16, t=50, b=16),
+        margin=dict(l=50, r=20, t=60, b=40),
         title=dict(
             text="Robustness Degradation — Match Rate vs Perturbation Severity",
             font=dict(size=14, color=TEXT),
